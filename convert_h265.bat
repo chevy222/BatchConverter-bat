@@ -9,7 +9,14 @@ rem   re-encoded as mjpeg when rotating, copied through untouched otherwise
 rem   the source's rotation display matrix is cleared on both inputs, so the
 rem   physical transpose is never applied a second time by the player
 rem   all audio tracks are kept (was: only a:0, silently dropping the rest)
-rem   rotation: arg/prompt 1 = counter-clockwise 90, 2 = none, default = clockwise 90
+rem   rotation: arg/prompt 1 = counter-clockwise 90, 2 = none,
+rem             default = clockwise 90,
+rem             3 = NO rotation but a centre crop: the left/right sides are cut
+rem                 away so the frame fills a portrait MAXH x MAXW (1080x1920)
+rem                 box. Same long/short-side cap as the other modes, so a source
+rem                 that is not tall enough is only scaled DOWN, never up. See the
+rem                 CROP block below the scale block. (ROTATION mode 3 - unrelated
+rem                 to the encoder MODE 1/2/3 described just below.)
 rem
 rem Encoder path is negotiated once on the first file, then locked in:
 rem   MODE 1  full GPU : qsv decode -> vpp_qsv / scale_qsv -> hevc_qsv   (fastest)
@@ -139,13 +146,14 @@ if /i "%CD%"=="%OUTDIR_FULL%" (
     exit /b 1
 )
 
-rem --- rotation mode: 1 = counter-clockwise 90, 2 = none, default (Enter) = clockwise 90
+rem --- rotation mode: 1 = counter-clockwise 90, 2 = none, 3 = centre crop to portrait,
+rem     default (Enter) = clockwise 90
 set "ROT=%~1"
 if not defined ROT if "%ASK%"=="0" set "ROT=0"
-if not defined ROT set /p "ROT=Rotation: 1=counter-clockwise 90, 2=no rotation, Enter=clockwise 90 : "
+if not defined ROT set /p "ROT=Rotation: 1=counter-clockwise 90, 2=no rotation, 3=centre crop portrait, Enter=clockwise 90 : "
 if not defined ROT set "ROT=0"
-if not "%ROT%"=="1" if not "%ROT%"=="2" if not "%ROT%"=="0" (
-    echo [ERROR] invalid rotation "%ROT%" ^(expected 1 / 2 or Enter^)
+if not "%ROT%"=="1" if not "%ROT%"=="2" if not "%ROT%"=="3" if not "%ROT%"=="0" (
+    echo [ERROR] invalid rotation "%ROT%" ^(expected 1 / 2 / 3 or Enter^)
     if "%ASK%"=="1" pause
     exit /b 1
 )
@@ -163,6 +171,29 @@ set "SC=min(1,min(%MAXW%/max(iw,ih),%MAXH%/min(iw,ih)))"
 set "WSC=floor(iw*%SC%/2)*2"
 set "HSC=floor(ih*%SC%/2)*2"
 
+rem --- ROT=3 only: the centre-crop rectangle, in the target aspect MAXH:MAXW
+rem (1080:1920). CWE/CHE are the largest rectangle the source has at that aspect,
+rem rounded down to even so the encoders always see mod-2 dimensions:
+rem   landscape source (wider than 1080:1920) -> full height, LEFT/RIGHT cut away
+rem   already 1080:1920                       -> no-op
+rem   narrower than 1080:1920                 -> full width, top/bottom cut away
+rem CPU path: crop runs FIRST, so the crop filter's own iw/ih are the source's
+rem dimensions, and when the scale step runs next its iw/ih ARE the cropped size -
+rem which is exactly what the WSC/HSC expressions above expect, so the CPU chain
+rem needs no new scale expression at all (CROPCPU is merely prepended to it).
+rem GPU path: vpp_qsv takes the rectangle as cw/ch/cx/cy, also measured on the
+rem source - but its w/h are evaluated against the PRE-crop frame. Verified on
+rem ffmpeg 9: handing it WSC/HSC there returns the source's own size (4K in,
+rem 1920x1080 out) and still exits 0, so the probe would happily lock that in.
+rem Hence the separate cw/ch-based pair for the GPU. cw/ch being visible to the
+rem w/h expression is not guesswork: vpp_qsv's own default is h="w*ch/cw".
+set "CWE=floor(min(iw,ih*%MAXH%/%MAXW%)/2)*2"
+set "CHE=floor(min(ih,iw*%MAXW%/%MAXH%)/2)*2"
+set "CROPCPU=crop=w='%CWE%':h='%CHE%':x='(in_w-out_w)/2':y='(in_h-out_h)/2',"
+set "CSC=min(1,min(%MAXW%/max(cw,ch),%MAXH%/min(cw,ch)))"
+set "CWSC=floor(cw*%CSC%/2)*2"
+set "CHSC=floor(ch*%CSC%/2)*2"
+
 set "ROTTXT=clockwise 90"
 set "ROTQSV=clock"
 set "ROTCPU=transpose=clock,"
@@ -172,14 +203,19 @@ if "%ROT%"=="1" set "ROTCPU=transpose=cclock,"
 if "%ROT%"=="2" set "ROTTXT=none"
 if "%ROT%"=="2" set "ROTQSV="
 if "%ROT%"=="2" set "ROTCPU="
+rem ROT=3: transpose nowhere - ROTCPU only carries the centre crop, which is
+rem prepended to the CPU scale step exactly like a transpose would be. ROTQSV is
+rem deliberately left alone: the GPU path has its own VF1 branch below.
+if "%ROT%"=="3" set "ROTTXT=centre crop to %MAXH%x%MAXW%"
+if "%ROT%"=="3" set "ROTCPU=%CROPCPU%"
 
 rem MODE 1 filters run on the GPU. vpp_qsv scales FIRST, then transposes, so it
 rem takes the PRE-rotation size (WSC/HSC) and the result comes out (HSC, WSC).
-if "%ROT%"=="2" (
-    set "VF1=scale_qsv=w='%WSC%':h='%HSC%'"
-) else (
-    set "VF1=vpp_qsv=transpose=%ROTQSV%:w='%WSC%':h='%HSC%'"
-)
+rem ROT=3 has no transpose: vpp_qsv crops (cw/ch/cx/cy) and scales in the same
+rem pass, but its w/h must be built from cw/ch (CWSC/CHSC) - see the CROP block.
+set "VF1=vpp_qsv=transpose=%ROTQSV%:w='%WSC%':h='%HSC%'"
+if "%ROT%"=="2" set "VF1=scale_qsv=w='%WSC%':h='%HSC%'"
+if "%ROT%"=="3" set "VF1=vpp_qsv=cw='%CWE%':ch='%CHE%':cx='(in_w-out_w)/2':cy='(in_h-out_h)/2':w='%CWSC%':h='%CHSC%'"
 rem MODE 2 / 3 filters run on the CPU and TRANSPOSE FIRST, so when their scale
 rem step runs, iw/ih already describe the ROTATED frame - and because WSC/HSC are
 rem expressions, scale='%WSC%':'%HSC%' then yields the correctly oriented size by
@@ -188,6 +224,11 @@ rem for the rotated case; that does not rotate anything, it just re-squashes the
 rem frame: 480x640 came out 480x640 instead of 640x480, 2560x1440 came out
 rem 1920x1080 instead of 1080x1920. Reverted.) ROTCPU is empty for ROT=2, so one
 rem line covers every case. MODE 2 additionally prepends hwdownload,format=nv12.
+rem ROT=3 needs no second line either: ROTCPU holds the centre crop there, and
+rem the scale step that follows sees the already-cropped frame - i.e. WSC/HSC do
+rem for the crop exactly what they do for the transpose. The cover art goes
+rem through this very string (see the MAPS/COVER block), so it gets cropped with
+rem the video, same as it gets rotated with the video in ROT=0/1.
 set "VFCPU=%ROTCPU%scale='%WSC%':'%HSC%'"
 
 rem --- nothing to do?
@@ -391,7 +432,8 @@ rem with rotation=90 produced an output with no rotation side data at all,
 rem while a source without the tag was unaffected (control).
 set "DROT=-display_rotation 0"
 
-rem When rotating, the cover must follow the video. -hwaccel qsv hw-decodes
+rem When rotating - or centre-cropping (ROT=3), where VFCPU carries the crop
+rem instead of a transpose - the cover must follow the video. -hwaccel qsv hw-decodes
 rem the cover (mjpeg/png) into QSV frames that CPU filters cannot consume, so
 rem the cover is taken from a second software-only input (DIN) and re-encoded
 rem as high-quality mjpeg - a filtered stream cannot be stream-copied.
