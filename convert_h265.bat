@@ -509,33 +509,35 @@ goto :eof
 rem ===================================================================
 rem  enc1 / enc2 / enc3 - one ffmpeg call each, exit code left in ERRORLEVEL
 rem  %MAPS% %COVER% %DIN% %DROT% %LPOPT% must already be set (done in :process)
+rem  Each builds the FULL command line into FFCMD, echoes it as [CMD], then
+rem  runs the same variable - what the console shows is byte-for-byte what
+rem  executes (single source of truth, they cannot drift apart). Useful for
+rem  re-running a failed file by hand. The set line uses the UNQUOTED form
+rem  (same trick as the DIN line above): with a leading quote the first path
+rem  would fall OUTSIDE a quoted region and a filename with & or ^ would
+rem  corrupt the value - verified by test.
 rem ===================================================================
 :enc1
 rem full GPU: qsv decode -> vpp_qsv / scale_qsv -> hevc_qsv
-"%FF%" -v error -stats -nostdin -y -noautorotate %DROT% -hwaccel qsv -hwaccel_output_format qsv -i "%IN%" %DIN% ^
-    %MAPS% -filter:v:0 "%VF1%" ^
-    -c:v:0 hevc_qsv %LPOPT% -preset veryfast -extbrc 1 ^
-    -b:v %KB%k -maxrate %MAXKB%k -bufsize %BUFKB%k -tag:v:0 hvc1 ^
-    %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -hwaccel qsv -hwaccel_output_format qsv -i "%IN%" %DIN% %MAPS% -filter:v:0 "%VF1%" -c:v:0 hevc_qsv %LPOPT% -preset veryfast -extbrc 1 -b:v %KB%k -maxrate %MAXKB%k -bufsize %BUFKB%k -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+echo [CMD] "%FF%" %FFCMD%
+"%FF%" %FFCMD%
 exit /b
 
 :enc2
 rem hybrid: qsv decode -> hwdownload -> CPU filter -> hevc_qsv
 rem -hwaccel qsv hands QSV frames to the filter graph even without
 rem -hwaccel_output_format qsv, so hwdownload is mandatory before CPU filters.
-"%FF%" -v error -stats -nostdin -y -noautorotate %DROT% -hwaccel qsv -i "%IN%" %DIN% ^
-    %MAPS% -filter:v:0 "hwdownload,format=nv12,%VFCPU%" ^
-    -c:v:0 hevc_qsv -preset veryfast -extbrc 1 ^
-    -b:v %KB%k -maxrate %MAXKB%k -bufsize %BUFKB%k -tag:v:0 hvc1 ^
-    %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -hwaccel qsv -i "%IN%" %DIN% %MAPS% -filter:v:0 "hwdownload,format=nv12,%VFCPU%" -c:v:0 hevc_qsv -preset veryfast -extbrc 1 -b:v %KB%k -maxrate %MAXKB%k -bufsize %BUFKB%k -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+echo [CMD] "%FF%" %FFCMD%
+"%FF%" %FFCMD%
 exit /b
 
 :enc3
 rem software fallback: CPU decode -> CPU filter -> libx265
-"%FF%" -v error -stats -nostdin -y -noautorotate %DROT% -i "%IN%" %DIN% ^
-    %MAPS% -filter:v:0 "%VFCPU%" ^
-    -c:v:0 libx265 -crf %CRF% -preset medium -tag:v:0 hvc1 ^
-    %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -i "%IN%" %DIN% %MAPS% -filter:v:0 "%VFCPU%" -c:v:0 libx265 -crf %CRF% -preset medium -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+echo [CMD] "%FF%" %FFCMD%
+"%FF%" %FFCMD%
 exit /b
 
 rem ===================================================================

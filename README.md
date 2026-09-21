@@ -62,6 +62,7 @@ Cover  : 1 (1 = keep attached_pic, rotated with the video)
 ----------------------------------------
 [CONV] "VID_0001.mp4" : bitrate 4200k (peak 5040k), rotate clockwise 90, audio +6.3dB @ 128k
 [PROBE] negotiating encoder path on the first file...
+[CMD] "C:\Tools\ffmpeg\bin\ffmpeg.exe" -v error -stats -nostdin -y -noautorotate -display_rotation 0 -hwaccel qsv -i "VID_0001.mp4" -map 0:v:0 ... (每次编码前完整回显，与实际执行同一变量驱动)
 [PROBE] mode 2 locked: hybrid (qsv decode, CPU filter, hevc_qsv)
 [OK] "VID_0001.mp4" (1478014 bytes)
 ----------------------------------------
@@ -215,6 +216,7 @@ set "SC=min(%MAXW%/max(iw,ih),%MAXH%/min(iw,ih))"      REM CPU 侧
 - **`OUTDIR` 的尾斜杠会让「源目录 == 输出目录」守卫失效**：`%%~f` 会保留尾斜杠（`for %I in ("C:\x\Desktop\") do @echo [%~fI]` → `[C:\x\Desktop\]`），永远不等于 `%CD%` 的 `C:\x\Desktop`，守卫此前一直在空转——从桌面运行时所有文件会被静默 SKIP。现在先 `md` 建目录、再用 `pushd` 归一化路径后比较（`pushd` 会去掉尾分隔符、解析短名）。
 - **`set /p` 的两种命运**：stdin 是 NUL / 已 EOF 时它**立即返回**、变量保持未定义（脚本第 136 行的 `if not defined ROT set "ROT=0"` 正是靠这个兜底，所以 `convert_h265.bat < NUL` 能正常跑）；但如果 stdin 是一个**打开着却一直不给数据**的管道，或者没有控制台输入的计划任务，它会一直等下去。这类场景请传参数（`convert_h265.bat 1`）或设 `ASK=0`。
 - **每个文件要多跑一遍音频峰值扫描**（一次纯音频空解码），超大批量时会多花时间。
+- **每次编码前回显完整命令（`[CMD]` 行）**：三种编码模式的 ffmpeg 命令先存入 `FFCMD` 变量、echo 再执行，回显与实际执行由同一变量驱动、不可能失步，失败文件可直接复制 `[CMD]` 行手工重放排查。set 行刻意用**无引号形式**（与 DIN 行同一技巧）：带前导引号会让第一个路径落到引号区外，含 `&`/`^` 的文件名会截断命令（已实测）。探测阶段的 ffprobe / volumedetect 调用不回显。
 - **封面旋转为什么要用第二个输入**：`-hwaccel qsv` 会把封面（mjpeg/png）也硬解成 QSV 硬件帧，CPU 的 `transpose/scale` 滤镜无法消费（报 `Impossible to convert between the formats ... src: qsv`）；因此封面取自同一个文件的第二个**不带 hwaccel** 的软解输入，三种编码模式下行为一致。封面重编码为 mjpeg `-q 2`（接近视觉无损）。
 - ffmpeg 的 mp4 封装器会把 `attached_pic` 流写在文件末尾（音频之后），输出里封面流排在最后属正常现象。
 - **仅处理当前目录一层**的 `*.mp4`，不递归，也不匹配 `.mov`/`.mkv`（可自行改 `for` 行的通配符）。
