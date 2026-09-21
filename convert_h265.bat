@@ -461,21 +461,25 @@ if "%KEEPCOVER%"=="1" (
 )
 
 rem :probe already encodes the first file with the winning encN, so only
-rem dispatch when a mode is already locked. Nothing inside the parens reads
-rem ERRORLEVEL, per the trap note at the top of this file.
-rem CAVEAT: %VMODE% IS read inside a bracketed block below, so it is expanded
-rem when this whole if/else is parsed. That is safe only because :probe sets
-rem VMODE at RUN time and this statement gets parsed again on the next
-rem `call :process` - i.e. it is correct from file 2 onwards. Anything that
-rem turns the per-file `call` into one long-parsed block would silently make
-rem every file re-negotiate the encoder path (or take the else branch forever).
-if defined VMODE (
-    if "%VMODE%"=="1" call :enc1
-    if "%VMODE%"=="2" call :enc2
-    if "%VMODE%"=="3" call :enc3
-) else (
-    call :probe
-)
+rem dispatch when a mode is already locked.
+rem NO BRACKETED BLOCK HERE ON PURPOSE. The old form
+rem     if defined VMODE ( ... ) else ( call :probe )
+rem was a landmine: `if defined` is evaluated at RUN time, but %VMODE% is
+rem expanded when the whole if/else is PARSED, so the code was correct only
+rem because `call :process` re-parses it per file. Hoisting it into a
+rem once-parsed block would make every file after the first take the true
+rem branch with the stale pre-loop %VMODE% (empty) and call NO encoder at
+rem all - files silently skipped. Line-based flow has no such split: each
+rem line below is parsed independently, so %VMODE% is always the value
+rem current at the moment the line runs.
+if defined VMODE goto :dispatch
+call :probe
+goto :dispatch_done
+:dispatch
+if "%VMODE%"=="1" call :enc1
+if "%VMODE%"=="2" call :enc2
+if "%VMODE%"=="3" call :enc3
+:dispatch_done
 if not "%ERRORLEVEL%"=="0" (set "RC=1") else (set "RC=0")
 
 rem guard against the silent "frame=0 but exit 0" case: a failed run can still

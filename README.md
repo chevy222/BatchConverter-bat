@@ -206,6 +206,7 @@ set "SC=min(%MAXW%/max(iw,ih),%MAXH%/min(iw,ih))"      REM CPU 侧
 2. **`if errorlevel 1` 的含义是「≥ 1」，读不到负的退出码**。ffmpeg 在 QSV 滤镜失败时返回 `-1313558101`，用 `if errorlevel 1` 判断会被当成成功。脚本统一用文本比较 `if not "%ERRORLEVEL%"=="0"`。
 3. **`call` 传参时 `^` 会被翻倍**。`call :sub "a ^ b.mp4"` 里子程序收到的 `%~1` 是 `a ^^ b.mp4`，与磁盘文件名不再匹配。脚本因此不通过参数传路径，改用变量：`for %%f ... do ( set "IN=%%~ff" & call :process )`。
 4. **`set "VAR=-i "%PATH%""` 这种嵌套引号写法是地雷**。展开后路径落在未加引号的区域：文件名带 `(` `)` 会截断括号块（报 `\file was unexpected at this time`），带 `&` 会拆分命令且变量被**静默截断**。正确写法是无引号 set 形式 `set VAR=-i "%PATH%"`——路径完整处于单一引号区内，`(` `)` `&` `^` 空格全部安全（均已实测）。
+5. **`if defined VAR` 是运行时求值，而 `%VAR%` 是解析时展开，两者混进同一个括号块就是隐形炸弹**。编码器 dispatch 曾写成 `if defined VMODE ( if "%VMODE%"=="1" ... ) else ( call :probe )`：当时碰巧正确，只因 `call :process` 每个文件都重新解析一次这段代码。一旦被接进只解析一次的大块（如内联进 for 循环体），第二个文件起 `defined` 在运行时为真、进入块内，但 `%VMODE%` 展开的仍是解析时的旧值（空）——三条比较全假，**一个编码器都不会被调用**，后续文件静默失败。现已改为行式 goto 流程（`:dispatch` / `:dispatch_done` 标签）：每行独立解析，`%VMODE%` 恒为执行到该行时的当前值，正确性不再依赖「每文件重新解析」这个结构偶然性。
 
 ### 其它
 
