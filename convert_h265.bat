@@ -337,9 +337,29 @@ if exist "%OUTDIR%\%NAME%" (
     goto :eof
 )
 
-rem --- probe video stream bitrate, fallback to container bitrate, then default
+rem --- locate the real video stream FIRST. Cover art can sit at v:0 (yt-dlp
+rem often writes it first) and must never be fed through the rotate/scale
+rem filter. Probed even when KEEPCOVER=0: the real stream must still be
+rem located, or a cover-first file would encode its cover as the only video
+rem stream. This runs BEFORE the bitrate probe below so that probe reads the
+rem stream that will actually be encoded: on a cover-first file the cover
+rem stream's (tiny) bit_rate would otherwise throttle the real video.
+set "MAINV=0"
+set "OTHERV=1"
+set "V0C="
+"%FP%" -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "%IN%" > "%V0FILE%" 2>nul
+set /p V0C=<"%V0FILE%"
+if /i "%V0C%"=="mjpeg" set "MAINV=1" & set "OTHERV=0"
+if /i "%V0C%"=="png"   set "MAINV=1" & set "OTHERV=0"
+if /i "%V0C%"=="bmp"   set "MAINV=1" & set "OTHERV=0"
+if /i "%V0C%"=="gif"   set "MAINV=1" & set "OTHERV=0"
+
+rem --- probe video stream bitrate, fallback to container bitrate, then default.
+rem Read from v:%MAINV% (the real video), NOT always v:0 - see the block above.
+rem Still exactly two ffprobe calls per file (codec_name + bit_rate), just in
+rem swapped order.
 set "BR="
-"%FP%" -v error -select_streams v:0 -show_entries stream=bit_rate -of csv=p=0 "%IN%" > "%BRFILE%" 2>nul
+"%FP%" -v error -select_streams v:%MAINV% -show_entries stream=bit_rate -of csv=p=0 "%IN%" > "%BRFILE%" 2>nul
 set /p BR=<"%BRFILE%"
 if not defined BR goto :fallback
 if "%BR%"=="N/A" goto :fallback
@@ -358,20 +378,6 @@ if %KB% GTR %BRCAP% (
 )
 set /a MAXKB=KB*12/10
 set /a BUFKB=KB*2
-
-rem --- locate the real video stream. Cover art can sit at v:0 (yt-dlp often
-rem writes it first) and must never be fed through the rotate/scale filter.
-rem Probed even when KEEPCOVER=0: the real stream must still be located, or a
-rem cover-first file would encode its cover as the only video stream.
-set "MAINV=0"
-set "OTHERV=1"
-set "V0C="
-"%FP%" -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "%IN%" > "%V0FILE%" 2>nul
-set /p V0C=<"%V0FILE%"
-if /i "%V0C%"=="mjpeg" set "MAINV=1" & set "OTHERV=0"
-if /i "%V0C%"=="png"   set "MAINV=1" & set "OTHERV=0"
-if /i "%V0C%"=="bmp"   set "MAINV=1" & set "OTHERV=0"
-if /i "%V0C%"=="gif"   set "MAINV=1" & set "OTHERV=0"
 
 rem --- scan audio peak level, compute max no-clip gain (amplify to 0 dBFS)
 rem note: no -v error here on purpose, volumedetect prints at info level.
