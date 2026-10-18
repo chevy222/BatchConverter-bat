@@ -68,10 +68,10 @@ rem as %1 - in those cases.
 set "ASK=1"
 rem 1 = keep the source cover art as attached_pic
 set "KEEPCOVER=1"
-rem Leave empty to auto-negotiate, or pin to 1 / 2 / 3
+rem Leave empty to auto-negotiate, or pin to 1 / 2 / 3 / 4
 set "FORCE_MODE="
-if defined FORCE_MODE if not "%FORCE_MODE%"=="1" if not "%FORCE_MODE%"=="2" if not "%FORCE_MODE%"=="3" (
-    echo [ERROR] invalid FORCE_MODE "%FORCE_MODE%" ^(expected 1 / 2 / 3^)
+if defined FORCE_MODE if not "%FORCE_MODE%"=="1" if not "%FORCE_MODE%"=="2" if not "%FORCE_MODE%"=="3" if not "%FORCE_MODE%"=="4" (
+    echo [ERROR] invalid FORCE_MODE "%FORCE_MODE%" ^(expected 1 / 2 / 3 / 4^)
     if "%ASK%"=="1" pause
     exit /b 1
 )
@@ -268,8 +268,10 @@ echo ----------------------------------------
 rem the path is passed to :process via the IN variable, NOT as a call
 rem argument: `call` re-parses its arguments and doubles every ^ in them,
 rem so a filename like "a ^ b.mp4" would no longer match the file on disk.
+set "CURCNT=0"
 for %%f in ("%CD%\*.mp4") do (
     set "IN=%%~ff"
+    set /a CURCNT+=1
     call :process
 )
 
@@ -319,7 +321,13 @@ if "%ERRORLEVEL%"=="0" (
 call :enc3
 if "%ERRORLEVEL%"=="0" (
     set "VMODE=3"
-    echo [PROBE] mode 3 locked: software ^(CPU decode, CPU filter, libx265^)
+    echo [PROBE] mode 3 locked: soft decode + QSV encode ^(CPU decode, format=nv12, hevc_qsv^)
+    exit /b 0
+)
+call :enc4
+if "%ERRORLEVEL%"=="0" (
+    set "VMODE=4"
+    echo [PROBE] mode 4 locked: software ^(CPU decode, CPU filter, libx265^)
     exit /b 0
 )
 echo [PROBE] all encoder paths failed on the first file
@@ -331,6 +339,8 @@ rem ===================================================================
 :process
 rem IN is set by the caller; derive NAME from it
 for %%I in ("%IN%") do set "NAME=%%~nxI"
+echo.
+echo ===== [%CURCNT%/%TOTAL%] "%NAME%" =====
 if exist "%OUTDIR%\%NAME%" (
     echo [SKIP] "%NAME%" ^(already in output dir^)
     set /a SKIPCNT+=1
@@ -386,11 +396,14 @@ rem -c:a WITHOUT the :0 stream specifier so every audio track survives. It used
 rem to be -c:a:0 paired with -map 0:a:0?, which silently dropped every track
 rem after the first. Caveat: the peak below is measured on the first track
 rem only, and the resulting gain/bitrate is then applied to all of them.
+rem -map 0:a:0 -t 600: only scan the first audio track for the first 10 minutes.
+rem volumedetect is a stats filter that must decode the entire stream; a 2-hour
+rem 4K clip would otherwise burn tens of seconds per file just measuring peak.
 set "AUD=-c:a copy"
 set "AUDTXT=copy"
 set "MAXVOL="
 set "GI=0"
-"%FF%" -hide_banner -nostats -nostdin -noautorotate -i "%IN%" -vn -af volumedetect -f null NUL 2>&1 | findstr /c:"max_volume" > "%VOLFILE%"
+"%FF%" -hide_banner -nostats -nostdin -noautorotate -i "%IN%" -vn -map 0:a:0 -t 600 -af volumedetect -f null NUL 2>&1 | findstr /c:"max_volume" > "%VOLFILE%"
 for /f "usebackq tokens=5" %%a in ("%VOLFILE%") do set "MAXVOL=%%a"
 if not defined MAXVOL goto :haveaud
 rem A positive or zero peak means the source already clips; amplifying would only
@@ -485,6 +498,7 @@ goto :dispatch_done
 if "%VMODE%"=="1" call :enc1
 if "%VMODE%"=="2" call :enc2
 if "%VMODE%"=="3" call :enc3
+if "%VMODE%"=="4" call :enc4
 :dispatch_done
 if not "%ERRORLEVEL%"=="0" (set "RC=1") else (set "RC=0")
 
@@ -534,8 +548,21 @@ echo [CMD] "%FF%" %FFCMD%
 exit /b
 
 :enc3
+rem soft-decode + QSV encode: CPU decode -> format=nv12 -> CPU filter -> hevc_qsv
+rem For sources QSV cannot hard-decode (mpeg4/avi/divx/xvid): the QSV hwaccel
+rem init would fail, but hevc_qsv encoding itself still works. No -hwaccel at
+rem all, so frames are already in system memory; prepend format=nv12 to feed
+rem the QSV encoder what it expects (hevc_qsv only accepts NV12 input frames).
+rem Cover art follows the same DIN/v:1 logic as enc2 (no QSV frames involved
+rem here, the second input is just a soft re-decode used for the rotated cover).
+set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -i "%IN%" %DIN% %MAPS% -filter:v:0 "format=nv12,%VFCPU%" -c:v:0 hevc_qsv -preset veryfast -extbrc 1 -b:v %KB%k -maxrate %MAXKB%k -bufsize %BUFKB%k -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+echo [CMD] "%FF%" %FFCMD%
+"%FF%" %FFCMD%
+exit /b
+
+:enc4
 rem software fallback: CPU decode -> CPU filter -> libx265
-set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -i "%IN%" %DIN% %MAPS% -filter:v:0 "%VFCPU%" -c:v:0 libx265 -crf %CRF% -preset medium -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
+set FFCMD=-v error -stats -nostdin -y -noautorotate %DROT% -i "%IN%" %DIN% %MAPS% -filter:v:0 "%VFCPU%" -c:v:0 libx265 -crf %CRF% -preset veryfast -tag:v:0 hvc1 %COVER% %AUD% -movflags +faststart "%OUTDIR%\%NAME%"
 echo [CMD] "%FF%" %FFCMD%
 "%FF%" %FFCMD%
 exit /b
