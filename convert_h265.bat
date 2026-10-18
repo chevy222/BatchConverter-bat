@@ -146,14 +146,14 @@ if /i "%CD%"=="%OUTDIR_FULL%" (
     exit /b 1
 )
 
-rem --- rotation mode: 1 = counter-clockwise 90, 2 = none, 3 = centre crop to portrait,
-rem     default (Enter) = clockwise 90
+rem --- rotation mode: 1 = counter-clockwise 90, 2 = none, 3 = audio-only gain,
+rem     4 = centre crop to portrait, default (Enter) = clockwise 90
 set "ROT=%~1"
 if not defined ROT if "%ASK%"=="0" set "ROT=0"
-if not defined ROT set /p "ROT=Rotation: 1=counter-clockwise 90, 2=no rotation, 3=centre crop portrait, Enter=clockwise 90 : "
+if not defined ROT set /p "ROT=Mode: 1=CCW90, 2=no rotate, 3=audio gain only, 4=center crop portrait, Enter=CW90 : "
 if not defined ROT set "ROT=0"
-if not "%ROT%"=="1" if not "%ROT%"=="2" if not "%ROT%"=="3" if not "%ROT%"=="0" (
-    echo [ERROR] invalid rotation "%ROT%" ^(expected 1 / 2 / 3 or Enter^)
+if not "%ROT%"=="1" if not "%ROT%"=="2" if not "%ROT%"=="3" if not "%ROT%"=="4" if not "%ROT%"=="0" (
+    echo [ERROR] invalid mode "%ROT%" ^(expected 0 / 1 / 2 / 3 / 4 or Enter^)
     if "%ASK%"=="1" pause
     exit /b 1
 )
@@ -203,19 +203,30 @@ if "%ROT%"=="1" set "ROTCPU=transpose=cclock,"
 if "%ROT%"=="2" set "ROTTXT=none"
 if "%ROT%"=="2" set "ROTQSV="
 if "%ROT%"=="2" set "ROTCPU="
-rem ROT=3: transpose nowhere - ROTCPU only carries the centre crop, which is
-rem prepended to the CPU scale step exactly like a transpose would be. ROTQSV is
-rem deliberately left alone: the GPU path has its own VF1 branch below.
-if "%ROT%"=="3" set "ROTTXT=centre crop to %MAXH%x%MAXW%"
-if "%ROT%"=="3" set "ROTCPU=%CROPCPU%"
+rem ROT=3: no rotate, no crop, no resize — just transcode + audio gain.
+rem Crank MAXW/MAXH huge so the scale factor evaluates to 1 (original size,
+rem mod-2 aligned). Reuses the same scale filter chain instead of special-casing
+rem an empty VFCPU, which would break the "format=nv12," trailing-comma case.
+if "%ROT%"=="3" (
+    set "ROTTXT=audio gain only (no rotate/crop/resize)"
+    set "ROTQSV="
+    set "ROTCPU="
+    set "MAXW=99999"
+    set "MAXH=99999"
+)
+rem ROT=4: centre crop portrait — transpose nowhere, ROTCPU carries the crop.
+rem ROTQSV is left alone: the GPU path has its own VF1 branch below.
+if "%ROT%"=="4" set "ROTTXT=centre crop to %MAXH%x%MAXW%"
+if "%ROT%"=="4" set "ROTCPU=%CROPCPU%"
 
 rem MODE 1 filters run on the GPU. vpp_qsv scales FIRST, then transposes, so it
 rem takes the PRE-rotation size (WSC/HSC) and the result comes out (HSC, WSC).
-rem ROT=3 has no transpose: vpp_qsv crops (cw/ch/cx/cy) and scales in the same
+rem ROT=4 has no transpose: vpp_qsv crops (cw/ch/cx/cy) and scales in the same
 rem pass, but its w/h must be built from cw/ch (CWSC/CHSC) - see the CROP block.
 set "VF1=vpp_qsv=transpose=%ROTQSV%:w='%WSC%':h='%HSC%'"
 if "%ROT%"=="2" set "VF1=scale_qsv=w='%WSC%':h='%HSC%'"
-if "%ROT%"=="3" set "VF1=vpp_qsv=cw='%CWE%':ch='%CHE%':cx='(in_w-out_w)/2':cy='(in_h-out_h)/2':w='%CWSC%':h='%CHSC%'"
+if "%ROT%"=="3" set "VF1=scale_qsv=w='%WSC%':h='%HSC%'"
+if "%ROT%"=="4" set "VF1=vpp_qsv=cw='%CWE%':ch='%CHE%':cx='(in_w-out_w)/2':cy='(in_h-out_h)/2':w='%CWSC%':h='%CHSC%'"
 rem MODE 2 / 3 filters run on the CPU and TRANSPOSE FIRST, so when their scale
 rem step runs, iw/ih already describe the ROTATED frame - and because WSC/HSC are
 rem expressions, scale='%WSC%':'%HSC%' then yields the correctly oriented size by
@@ -466,16 +477,19 @@ rem %DROT% is prepended so the second input is cleared too - it is a plain
 rem token pair in front of -i, so it does not disturb the quoting above.
 set "DIN="
 if "%KEEPCOVER%"=="1" (
-    if "%ROT%"=="2" (
-        set "MAPS=-map 0:v:%MAINV% -map 0:v:%OTHERV%? -map 0:a?"
-        set "COVER=-c:v:1 copy -disposition:v:1 attached_pic"
-    ) else (
-        set "MAPS=-map 0:v:%MAINV% -map 1:v:%OTHERV%? -map 0:a?"
-        set "COVER=-filter:v:1 %VFCPU% -c:v:1 mjpeg -q:v:1 2 -disposition:v:1 attached_pic"
-        set DIN=%DROT% -i "%IN%"
-    )
+    rem default: cover gets re-encoded (rotated/cropped modes)
+    set "MAPS=-map 0:v:%MAINV% -map 1:v:%OTHERV%? -map 0:a:0?"
+    set "COVER=-filter:v:1 %VFCPU% -c:v:1 mjpeg -q:v:1 2 -disposition:v:1 attached_pic"
+    set DIN=%DROT% -i "%IN%"
+    rem ROT=2 (no rotate) and ROT=3 (audio-only): no filter on cover -> stream copy
+    if "%ROT%"=="2" set "MAPS=-map 0:v:%MAINV% -map 0:v:%OTHERV%? -map 0:a:0?"
+    if "%ROT%"=="2" set "COVER=-c:v:1 copy -disposition:v:1 attached_pic"
+    if "%ROT%"=="2" set "DIN="
+    if "%ROT%"=="3" set "MAPS=-map 0:v:%MAINV% -map 0:v:%OTHERV%? -map 0:a:0?"
+    if "%ROT%"=="3" set "COVER=-c:v:1 copy -disposition:v:1 attached_pic"
+    if "%ROT%"=="3" set "DIN="
 ) else (
-    set "MAPS=-map 0:v:%MAINV% -map 0:a?"
+    set "MAPS=-map 0:v:%MAINV% -map 0:a:0?"
     set "COVER="
 )
 
